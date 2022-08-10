@@ -28,6 +28,7 @@ import numpy as np
 import os
 import random
 import torch
+import torch.distributed as dist
 import logging
 import yamlargparse
 import wandb
@@ -281,7 +282,17 @@ if __name__ == '__main__':
 
     train_loader, dev_loader = get_training_dataloaders(args)
 
-    #if args.gpu >= 1:
+    # gpus initialization inspired by wenet
+    rank = int(os.environ['LOCAL_RANK'])
+    world_size = int(os.environ['WORLD_SIZE'])
+    print(rank, world_size, args.gpu)
+    gpu = int(args.gpu.split(',')[rank])
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu)
+    dist.init_process_group(backend='nccl')
+    args.device = torch.device("cuda")
+
+    # orig gpu init
+    # if args.gpu >= 1:
     #    gpuid = use_single_gpu(args.gpu)
     #    logging.info('GPU device {} is used'.format(gpuid))
     #    args.device = torch.device("cuda")
@@ -297,6 +308,7 @@ if __name__ == '__main__':
         model = average_checkpoints(
             args.device, model, args.init_model_path, args.init_epochs)
         optimizer = setup_optimizer(args, model)
+
 
     train_batches_qty = len(train_loader)
     dev_batches_qty = len(dev_loader)
@@ -325,11 +337,12 @@ if __name__ == '__main__':
     device = torch.device("cuda")
 
     if isinstance(ddp_model, torch.nn.parallel.DistributedDataParallel):
-        model_context = model.join
+        model_context = ddp_model.join
     else:
         model_context = nullcontext
 
     dist.barrier()
+
     with torch.set_grad_enabled(True), model_context():
         for epoch in range(init_epoch, args.max_epochs):
             ddp_model.train()
@@ -372,6 +385,7 @@ if __name__ == '__main__':
                     labels = torch.stack(labels).to(args.device)
                     _, acum_dev_metrics = compute_loss_and_metrics(
                         ddp_model, labels, features, acum_dev_metrics)
+            
             wandb_log = {'epoch': epoch}
             for k in acum_dev_metrics.keys():
                 wandb_log[f'dev_{k}'] = float(acum_dev_metrics[k]) / dev_batches_qty
