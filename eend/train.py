@@ -30,6 +30,7 @@ import random
 import torch
 import logging
 import yamlargparse
+import wandb
 
 import torch
 torch.set_num_threads(8)
@@ -257,6 +258,16 @@ if __name__ == '__main__':
 
     writer = SummaryWriter(f"{args.output_path}/tensorboard")
 
+    wandb.login(
+        host="http://wandb.speech-rnd.internal",
+        key="local-473ad2cf1f9ed9023faf837048e75943e1bbe7c5"
+    )
+
+    wandb.init(
+        project='Jan_DIAR-91',
+        config=args,
+    )
+
     train_loader, dev_loader = get_training_dataloaders(args)
 
     if args.gpu >= 1:
@@ -310,6 +321,7 @@ if __name__ == '__main__':
                 model, labels, features, acum_train_metrics)
             if i % args.log_report_batches_num == \
                     (args.log_report_batches_num-1):
+                print(acum_train_metrics, acum_train_metrics.keys())
                 for k in acum_train_metrics.keys():
                     writer.add_scalar(
                         f"train_{k}",
@@ -338,8 +350,11 @@ if __name__ == '__main__':
                 labels = torch.stack(labels).to(args.device)
                 _, acum_dev_metrics = compute_loss_and_metrics(
                     model, labels, features, acum_dev_metrics)
+        wandb_log = {'epoch': epoch}
         for k in acum_dev_metrics.keys():
+            wandb_log[f'dev_{k}'] = float(acum_dev_metrics[k]) / dev_batches_qty
             writer.add_scalar(
                 f"dev_{k}", acum_dev_metrics[k] / dev_batches_qty,
                 epoch * dev_batches_qty + i)
+        wandb.log(wandb_log)
         acum_dev_metrics = reset_metrics(acum_dev_metrics)
