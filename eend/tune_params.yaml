@@ -1,0 +1,32 @@
+program: tune_params.py
+method: bayes
+metric:
+  goal: minimize
+  name: WDER
+parameters:
+  time_shuffle:
+    values: ["True", "False"]
+  estimate_spk_qty:
+    values: [1, 2, 3, 4, 5]
+  estimate_spk_qty_thr:
+    min: -10
+    max: 10
+    distribution: uniform
+  threshold:
+    min: 0.05
+    max: 0.95
+    distribution: uniform
+  median_window_length:
+    values: [1, 3, 5, 7, 11, 15]
+  wder_script:
+    value: /shared/workspaces/jprofant/GitHub/revspeech/kaldi_egs/testing/diarization/wder/wder.py
+  wder_interpreter:
+    value: /shared/workspaces/jprofant/anaconda3/envs/rev-diarization/bin/python
+  wer_results:
+    value: /shared/workspaces/jprofant/GitHub/revspeech/kaldi_egs/results/revspeech/20220208_e2e/temi_201902_2spk/results/wer
+  infer_data_dir:
+    value: ../../HITACHI_EEND/egs/mini_librispeech/v1/data/temi_201902_subset
+  infer_config:
+    value: ../examples/infer.yaml
+  models_path:
+    value: ../exp/verbatim_EEND_really-fixed-segments_vad-align_2spk/models

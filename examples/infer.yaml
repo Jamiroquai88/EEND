@@ -7,7 +7,7 @@ estimate_spk_qty_thr: -1
 feature_dim: 23
 frame_shift: 80
 frame_size: 200
-gpu: 0
+gpu: -1
 hidden_size: 256
 infer_data_dir: <Kaldi data directory for evaluation set>
 input_transform: logmel_meannorm
