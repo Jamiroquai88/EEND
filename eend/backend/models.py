@@ -319,7 +319,13 @@ class TransformerEDADiarization(Module):
             args.estimate_spk_qty != -1, \
             "Either 'estimate_spk_qty_thr' or 'estimate_spk_qty' \
             arguments have to be defined."
-        emb = self.get_embeddings(xs)
+         # run encoder in chunking
+        emb_chunks = []
+        for chunk_start in range(0, xs.shape[1], args.chunk_size):
+            xs_chunk = xs[:, chunk_start:chunk_start + args.chunk_size, :]
+            emb_chunks.append(self.get_embeddings(xs_chunk))
+        emb = torch.cat(emb_chunks, dim=1)
+        #emb = self.get_embeddings(xs)
         ys_active = []
         if args.time_shuffle:
             orders = [np.arange(e.shape[0]) for e in emb]
@@ -472,7 +478,9 @@ def average_checkpoints(
         checkpoint = torch.load(join(
             models_path,
             f"checkpoint_{e}.tar"), map_location=device)
-        copy_model.load_state_dict(checkpoint['model_state_dict'])
+        # remove module. which is added in case of multi-gpu training
+        msd = {k.replace('module.', ''): v for k, v in checkpoint['model_state_dict'].items()}
+        copy_model.load_state_dict(msd)
         states_dict_list.append(copy_model.state_dict())
     avg_state_dict = average_states(states_dict_list, device)
     avg_model = copy.deepcopy(model)

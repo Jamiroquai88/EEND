@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 import yaml
+import shutil
 
 from pyannote.database.util import load_rttm
 import wandb
@@ -25,6 +26,7 @@ if __name__ == '__main__':
     parser.add_argument('--estimate_spk_qty_thr', required=True, type=float)
     parser.add_argument('--threshold', required=True, type=float)
     parser.add_argument('--median_window_length', required=True, type=int)
+    parser.add_argument('--chunk_size', required=True, type=int)
     parser.add_argument('--wder_script', required=True, type=Path,
                         help='path to wder.py script to obtain metrics')
     parser.add_argument('--wder_interpreter', required=True, type=Path)
@@ -35,6 +37,7 @@ if __name__ == '__main__':
     parser.add_argument('--infer_config', required=True, type=Path,
                         help='path to generic inference config')
     parser.add_argument('--models_path', required=True, type=Path)
+    parser.add_argument('--epochs', required=True, type=str, help='epoch to use, format start-end, eg. 90-100')
 
     args = parser.parse_args()
     args_as_kwargs = vars(args)
@@ -75,19 +78,20 @@ if __name__ == '__main__':
             if len(annot) > 0:
                 assert list(annot.keys()) == [basename], f'Got {annot.keys()} instead of {basename} in file {rttm}'
                 for segment, track, label in annot[basename].itertracks(yield_label=True):
-                    print(segment, segment.start, segment.end)
                     fw.write(f'{basename} 0 {int(segment.start * 100)} {int((segment.end - segment.start) * 100)} S U U {label}\n')
 
-    subprocess.check_call(f'{args.wder_interpreter} {args.wder_script} '
-                          f'-s {tmp_dir / "segs"} '
-                          f'-n {args.wer_results} '
-                          f'-o {tmp_dir / "wder.json"}',
-                          shell=True)
+    wder_cmd = f'{args.wder_interpreter} {args.wder_script} ' \
+               f'-s {tmp_dir / "segs"} ' \
+               f'-n {args.wer_results} ' \
+               f'-o {tmp_dir / "wder.json"}'
+    print(wder_cmd)
+    subprocess.check_call(wder_cmd, shell=True)
     with (tmp_dir / 'wder.json').open('r') as f:
         json_dict = json.load(f)
         print(json_dict)
 
     wandb.log({
         'WDER': json_dict['cumulative']['wder'],
-        'Speaker Switch WDER': json_dict['cumulative']['0.18344013066968212'],
+        'Speaker Switch WDER': json_dict['cumulative']['switch_wder'],
     })
+    shutil.rmtree(tmp_dir)

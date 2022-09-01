@@ -87,7 +87,7 @@ def compute_loss_and_metrics(
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     n_speakers = np.asarray([t.shape[1] for t in labels])
     y_pred, attractor_loss = model(input, labels, args)
-    loss, standard_loss = model.get_loss(
+    loss, standard_loss = model.module.get_loss(
         y_pred, labels, n_speakers, attractor_loss)
     metrics = calculate_metrics(
         labels.detach(), y_pred.detach(), threshold=0.5)
@@ -174,7 +174,7 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--feature-dim', type=int)
     parser.add_argument('--frame-shift', type=int)
     parser.add_argument('--frame-size', type=int)
-    parser.add_argument('--gpu', '-g', default=-1, type=int,
+    parser.add_argument('--gpu', '-g', default=-1, type=str,
                         help='GPU ID (negative value indicates CPU)')
     parser.add_argument('--gradclip', default=-1, type=int,
                         help='gradient clipping. if < 0, no clipping')
@@ -262,7 +262,7 @@ if __name__ == '__main__':
         host="http://wandb.speech-rnd.internal",
         key="local-473ad2cf1f9ed9023faf837048e75943e1bbe7c5"
     )
-
+    
     wandb.init(
         project='Jan_DIAR-91',
         config=args,
@@ -270,9 +270,9 @@ if __name__ == '__main__':
 
     train_loader, dev_loader = get_training_dataloaders(args)
 
-    if args.gpu >= 1:
-        gpuid = use_single_gpu(args.gpu)
-        logging.info('GPU device {} is used'.format(gpuid))
+    if args.gpu != '-1':
+        #gpuid = use_single_gpu(args.gpu)
+        #logging.info('GPU device {} is used'.format(gpuid))
         args.device = torch.device("cuda")
     else:
         gpuid = -1
@@ -309,6 +309,8 @@ if __name__ == '__main__':
         # Save initial model
         save_checkpoint(args, init_epoch, model, optimizer, 0)
 
+    model = torch.nn.DataParallel(model, device_ids=[int(x) for x in args.gpu.split(',')])
+    model.to(f'cuda:{model.device_ids[0]}')
     for epoch in range(init_epoch, args.max_epochs):
         model.train()
         for i, batch in enumerate(train_loader):
@@ -321,11 +323,14 @@ if __name__ == '__main__':
                 model, labels, features, acum_train_metrics)
             if i % args.log_report_batches_num == \
                     (args.log_report_batches_num-1):
-                print(acum_train_metrics, acum_train_metrics.keys())
                 for k in acum_train_metrics.keys():
+                    if isinstance(acum_train_metrics[k], float):
+                        metric = acum_train_metrics[k] / args.log_report_batches_num
+                    elif isinstance(acum_train_metrics[k], torch.Tensor):
+                        metric = acum_train_metrics[k].mean() / args.log_report_batches_num
                     writer.add_scalar(
                         f"train_{k}",
-                        acum_train_metrics[k] / args.log_report_batches_num,
+                        metric,
                         epoch * train_batches_qty + i)
                 writer.add_scalar(
                     "lrate",
@@ -333,7 +338,7 @@ if __name__ == '__main__':
                     epoch * train_batches_qty + i)
                 acum_train_metrics = reset_metrics(acum_train_metrics)
             optimizer.zero_grad()
-            loss.backward()
+            loss.sum().backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.gradclip)
             optimizer.step()
 
@@ -352,9 +357,14 @@ if __name__ == '__main__':
                     model, labels, features, acum_dev_metrics)
         wandb_log = {'epoch': epoch}
         for k in acum_dev_metrics.keys():
-            wandb_log[f'dev_{k}'] = float(acum_dev_metrics[k]) / dev_batches_qty
+            if isinstance(acum_dev_metrics[k], float):
+                metric = acum_dev_metrics[k] / dev_batches_qty
+            elif isinstance(acum_dev_metrics[k], torch.Tensor):
+                metric = acum_dev_metrics[k].mean() / dev_batches_qty
+            wandb_log[f'dev_{k}'] = metric
             writer.add_scalar(
-                f"dev_{k}", acum_dev_metrics[k] / dev_batches_qty,
+                f"dev_{k}",
+                metric,
                 epoch * dev_batches_qty + i)
         wandb.log(wandb_log)
         acum_dev_metrics = reset_metrics(acum_dev_metrics)
