@@ -15,7 +15,7 @@ from backend.updater import (
     setup_optimizer,
 )
 from pathlib import Path
-from torch.nn import Module, ModuleList
+from torch.nn import Module, ModuleList, Linear
 from types import SimpleNamespace
 from typing import Dict, List, Tuple
 import copy
@@ -259,6 +259,52 @@ class TransformerEncoder(Module):
         return self.lnorm_out(e)
 
 
+class AddMarginProduct(Module):
+    r"""Implement of large margin cosine distance: :
+    Args:
+        in_features: size of each input sample
+        out_features: size of each output sample
+        s: norm of input feature
+        m: margin
+        cos(theta) - m
+    """
+
+    def __init__(self, in_features, out_features, s=30.0, m=0.2, device='cuda'):
+        super(AddMarginProduct, self).__init__()
+        self.device = device
+        self.in_features = in_features
+        self.out_features = out_features
+        self.s = s
+        self.m = m
+        self.weight = torch.nn.Parameter(torch.FloatTensor(out_features, in_features))
+        torch.nn.init.xavier_uniform_(self.weight)
+
+    def forward(self, input, label):
+        # --------------------------- cos(theta) & phi(theta) ---------------------------
+        cosine = F.linear(F.normalize(input), F.normalize(self.weight))
+        phi = cosine - self.m
+        print(cosine.shape, phi.shape)
+        # --------------------------- convert label to one-hot ---------------------------
+        one_hot = torch.zeros(cosine.size(), device=self.device)
+        print(one_hot.shape)
+        1/0
+        # one_hot = one_hot.cuda() if cosine.is_cuda else one_hot
+        one_hot.scatter_(1, label.view(-1, 1).long(), 1)
+        # -------------torch.where(out_i = {x_i if condition_i else y_i) -------------
+        output = (one_hot * phi) + ((1.0 - one_hot) * cosine)  # you can use torch.where if your torch.__version__ is 0.4
+        output *= self.s
+        # print(output)
+
+        return output
+
+    def __repr__(self):
+        return self.__class__.__name__ + '(' \
+               + 'in_features=' + str(self.in_features) \
+               + ', out_features=' + str(self.out_features) \
+               + ', s=' + str(self.s) \
+               + ', m=' + str(self.m) + ')'
+
+
 class TransformerEDADiarization(Module):
 
     def __init__(
@@ -269,6 +315,8 @@ class TransformerEDADiarization(Module):
         e_units: int,
         n_heads: int,
         n_layers: int,
+        embed_dim: int,
+        num_targets: int,
         dropout: float,
         attractor_loss_ratio: float,
         attractor_encoder_dropout: float,
@@ -285,12 +333,20 @@ class TransformerEDADiarization(Module):
           attractor_loss_ratio (float)
           attractor_encoder_dropout (float)
           attractor_decoder_dropout (float)
+          embed_dim (int): embedding dimensionality (after linear transform)
+          num_targets (int): number of outputs for additive margin softmax
         """
         self.device = device
         super(TransformerEDADiarization, self).__init__()
         self.enc = TransformerEncoder(
             self.device, in_size, n_layers, n_units, e_units, n_heads, dropout
         )
+
+        self.embedding = Linear(n_units, embed_dim)
+        self.metric = torch.nn.Sequential(torch.nn.ReLU(inplace=True),
+                                          torch.nn.Linear(embed_dim, num_targets))
+        # self.metric = AddMarginProduct(embed_dim, num_targets, device=device)
+
         self.eda = EncoderDecoderAttractor(
             self.device,
             n_units,
@@ -308,6 +364,7 @@ class TransformerEDADiarization(Module):
         emb = self.enc(xs)
         # emb: [(T, E), ...]
         emb = emb.reshape(pad_shape[0], pad_shape[1], -1)
+        emb = self.embedding(emb)
         return emb
 
     def estimate_sequential(
@@ -327,6 +384,16 @@ class TransformerEDADiarization(Module):
         #    emb_chunks.append(self.get_embeddings(xs_chunk))
         #emb = torch.cat(emb_chunks, dim=1)
         emb = self.get_embeddings(xs)
+        speaker_pred = self.metric(emb)
+
+        # pooling_mean = torch.mean(emb, dim=1)
+        # meansq = torch.mean(emb * emb, dim=1)
+        # pooling_std = torch.sqrt(meansq - pooling_mean ** 2 + 1e-10)
+        # pool_emb = torch.cat((torch.flatten(pooling_mean, start_dim=1),
+        #                       torch.flatten(pooling_std, start_dim=1)), 1)
+        # embedding = self.embedding(pool_emb)
+        # add_margin = self.add_margin(embedding)
+
         ys_active = []
         if args.time_shuffle:
             orders = [np.arange(e.shape[0]) for e in emb]
@@ -350,7 +417,7 @@ class TransformerEDADiarization(Module):
                 NotImplementedError(
                     'estimate_spk_qty or estimate_spk_qty_thr needed.')
         if return_emb:
-            return ys_active, emb
+            return ys_active, speaker_pred
         else:
             return ys_active
 
@@ -359,9 +426,17 @@ class TransformerEDADiarization(Module):
         xs: torch.Tensor,
         ts: torch.Tensor,
         args: SimpleNamespace
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         n_speakers = [t.shape[1] for t in ts]
         emb = self.get_embeddings(xs)
+        speaker_pred = self.metric(emb)
+        # pooling_mean = torch.mean(emb, dim=1)
+        # meansq = torch.mean(emb * emb, dim=1)
+        # pooling_std = torch.sqrt(meansq - pooling_mean ** 2 + 1e-10)
+        # pool_emb = torch.cat((torch.flatten(pooling_mean, start_dim=1),
+        #                       torch.flatten(pooling_std, start_dim=1)), 1)
+        # embedding = self.embedding(pool_emb)
+        # add_margin = self.add_margin(embedding)
 
         if args.time_shuffle:
             orders = [np.arange(e.shape[0]) for e in emb]
@@ -375,15 +450,29 @@ class TransformerEDADiarization(Module):
 
         # ys: [(T, C), ...]
         ys = torch.matmul(emb, attractors.permute(0, 2, 1))
-        return ys, attractor_loss
+        return ys, attractor_loss, speaker_pred
 
     def get_loss(
         self,
         ys: torch.Tensor,
         target: torch.Tensor,
         n_speakers: List[int],
-        attractor_loss: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        attractor_loss: torch.Tensor,
+        speaker_pred: torch.Tensor,
+        speakers: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # dimensionality is (batch, input_size, num_targets)
+        # to compute CE loss we need to flatten
+        speaker_pred = speaker_pred.flatten(0, 1)
+
+        # dimensionality is (batch, input_size, num_targets) - one hot
+        # take max from last dimension and flatten to match prediction
+        speakers = speakers.argmax(dim=2).flatten()
+
+        # compute cross entropy loss for speaker predictions
+        ce_loss = torch.nn.CrossEntropyLoss()(speaker_pred, speakers)
+        print(ce_loss)
+
         ts_padded = target
         max_n_speakers = max(n_speakers)
         ts_padded = pad_labels(target, max_n_speakers)
@@ -393,7 +482,7 @@ class TransformerEDADiarization(Module):
             self.device, ys_padded, ts_padded, n_speakers)
         loss = standard_loss(ys_padded, labels.float())
 
-        return loss + attractor_loss * self.attractor_loss_ratio, loss
+        return loss + attractor_loss * self.attractor_loss_ratio + ce_loss, loss, ce_loss
 
 
 def pad_labels(ts: torch.Tensor, out_size: int) -> torch.Tensor:
@@ -467,6 +556,8 @@ def get_model(args: SimpleNamespace) -> Module:
             attractor_encoder_dropout=args.attractor_encoder_dropout,
             attractor_decoder_dropout=args.attractor_decoder_dropout,
             detach_attractor_loss=args.detach_attractor_loss,
+            embed_dim=args.embed_dim,
+            num_targets=args.num_targets
         )
     else:
         raise ValueError('Possible model_type are "TransformerEDA"')
