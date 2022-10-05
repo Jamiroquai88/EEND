@@ -342,9 +342,9 @@ class TransformerEDADiarization(Module):
             self.device, in_size, n_layers, n_units, e_units, n_heads, dropout
         )
 
-        self.embedding = Linear(n_units, embed_dim)
+        self.embedding = Linear(n_units, embed_dim, device=self.device)
         self.metric = torch.nn.Sequential(torch.nn.ReLU(inplace=True),
-                                          torch.nn.Linear(embed_dim, num_targets))
+                                          torch.nn.Linear(embed_dim, num_targets, device=self.device))
         # self.metric = AddMarginProduct(embed_dim, num_targets, device=device)
 
         self.eda = EncoderDecoderAttractor(
@@ -464,13 +464,14 @@ class TransformerEDADiarization(Module):
         # dimensionality is (batch, input_size, num_targets)
         # to compute CE loss we need to flatten
         speaker_pred = speaker_pred.flatten(0, 1)
-
+      
         # dimensionality is (batch, input_size, num_targets) - one hot
         # take max from last dimension and flatten to match prediction
         speakers = speakers.argmax(dim=2).flatten()
-
+       
         # compute cross entropy loss for speaker predictions
         ce_loss = torch.nn.CrossEntropyLoss()(speaker_pred, speakers)
+        print(speaker_pred.is_cuda, speakers.is_cuda)
         print(ce_loss)
 
         ts_padded = target
