@@ -32,6 +32,10 @@ import logging
 import yamlargparse
 import wandb
 
+
+torch.set_num_threads(8)
+
+
 def _init_fn(worker_id):
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
