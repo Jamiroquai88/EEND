@@ -463,12 +463,12 @@ class TransformerEDADiarization(Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # dimensionality is (batch, input_size, num_targets)
         # to compute CE loss we need to flatten
-        speaker_pred = speaker_pred.flatten(0, 1)
+        speaker_pred = speaker_pred.flatten(0, 1).cpu()
 
         # dimensionality is (batch, input_size, num_targets) - one hot
         # take max from last dimension and flatten to match prediction
         speakers = speakers.argmax(dim=2).flatten()
-        speakers_non_zero_indeces = torch.nonzero(speakers)[:, 0]
+        speakers_non_zero_indeces = torch.nonzero(speakers)[:, 0].cpu()
 
         avg_pred, speaker_labels = [], []
         # obtain a list of groups which have continuous speaker label
