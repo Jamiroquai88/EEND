@@ -362,6 +362,7 @@ if __name__ == '__main__':
                 features, labels, speakers = pad_sequence(features, labels, speakers, args.num_frames)
                 features = torch.stack(features).to(args.device)
                 labels = torch.stack(labels).to(args.device)
+                speakers = torch.stack(speakers).to(args.device)
                 _, acum_dev_metrics = compute_loss_and_metrics(
                     model, labels, features, speakers, acum_dev_metrics)
         wandb_log = {'epoch': epoch}
