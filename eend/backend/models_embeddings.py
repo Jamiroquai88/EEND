@@ -467,7 +467,7 @@ class TransformerEDADiarization(Module):
 
         # dimensionality is (batch, input_size, num_targets) - one hot
         # take max from last dimension and flatten to match prediction
-        speakers = speakers.argmax(dim=2).flatten()
+        speakers = speakers.argmax(dim=2).flatten().cpu()
         speakers_non_zero_indeces = torch.nonzero(speakers)[:, 0].cpu()
 
         avg_pred, speaker_labels = [], []
