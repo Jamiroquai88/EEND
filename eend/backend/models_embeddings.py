@@ -468,7 +468,7 @@ class TransformerEDADiarization(Module):
         # dimensionality is (batch, input_size, num_targets) - one hot
         # take max from last dimension and flatten to match prediction
         speakers = speakers.argmax(dim=2).flatten()
-        speakers_non_zero_indeces = torch.nonzero(speakers)[:, 0]
+        speakers_non_zero_indeces = torch.nonzero(speakers)[:, 0].cpu()
 
         avg_pred, speaker_labels = [], []
         # obtain a list of groups which have continuous speaker label
@@ -496,7 +496,7 @@ class TransformerEDADiarization(Module):
 
         # compute cross entropy loss for speaker predictions
         ce_loss = torch.nn.CrossEntropyLoss()(torch.stack(avg_pred), torch.Tensor(speaker_labels).long())
-        
+
         ts_padded = target
         max_n_speakers = max(n_speakers)
         ts_padded = pad_labels(target, max_n_speakers)
