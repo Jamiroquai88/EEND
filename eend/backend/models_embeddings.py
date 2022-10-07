@@ -473,7 +473,8 @@ class TransformerEDADiarization(Module):
         # dimensionality is (batch, input_size, num_targets) - one hot
         # take max from last dimension and flatten to match prediction
         speakers = labels.argmax(dim=2).flatten()
-        am_loss = self.metric(speaker_pred, speakers)
+        indexes = torch.randperm(speakers.shape[0])[:1000]
+        am_loss = self.metric(speaker_pred[indexes, :], speakers[indexes])
         # pooling_mean = torch.mean(emb, dim=1)
         # meansq = torch.mean(emb * emb, dim=1)
         # pooling_std = torch.sqrt(meansq - pooling_mean ** 2 + 1e-10)
