@@ -463,28 +463,40 @@ class TransformerEDADiarization(Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # dimensionality is (batch, input_size, num_targets)
         # to compute CE loss we need to flatten
-        speaker_pred = speaker_pred.flatten(0, 1).cpu()
+        speaker_pred = speaker_pred.flatten(0, 1)
 
         # dimensionality is (batch, input_size, num_targets) - one hot
         # take max from last dimension and flatten to match prediction
-        speakers = speakers.argmax(dim=2).flatten().cpu()
-        speakers_non_zero_indeces = torch.nonzero(speakers)[:, 0].cpu()
+        speakers = speakers.argmax(dim=2).flatten()
+        speakers_non_zero_indeces = torch.nonzero(speakers)[:, 0]
 
         avg_pred, speaker_labels = [], []
         # obtain a list of groups which have continuous speaker label
-        split_groups = np.split(np.array(speakers_non_zero_indeces), np.where(np.diff(np.array(speakers_non_zero_indeces)) != 1)[0]+1)
+        split_groups = torch.tensor_split(speakers_non_zero_indeces, (torch.diff(speakers_non_zero_indeces) != 1).nonzero()[:, 0])
         for split_group in split_groups:
-            start, end = split_group[0], split_group[-1]
-            speaker_group = np.array(speakers[start:end])
-            if len(set(speaker_group)) == 1:
+            print(split_group.nelement(), split_group.shape)
+            if split_group.nelement() <= 3:  # ignore very short
+                continue
+            start, end = split_group[0] + 1, split_group[-1] - 1
+            speaker_group = speakers[start:end]
+            if torch.min(speaker_group) == torch.max(speaker_group):
                 # obtained multiple speaker labels for start and end
                 # ignore labels that don't have any silence
                 speaker_labels.append(speaker_group[0])
                 avg_pred.append(torch.mean(speaker_pred[start:end, :], dim=0))
+            else:
+                cont_segment_idx = (torch.diff(speaker_group) != 0).nonzero().flatten()
+                start = 0
+                end = speaker_group.shape[0] - 1
+                for segment_end in cont_segment_idx:
+                    speaker_labels.append(speaker_group[segment_end])
+                    avg_pred.append(torch.mean(speaker_pred[start:segment_end, :], dim=0))
+                speaker_labels.append(speaker_group[end])
+                avg_pred.append(torch.mean(speaker_pred[start:end, :], dim=0))
 
         # compute cross entropy loss for speaker predictions
         ce_loss = torch.nn.CrossEntropyLoss()(torch.stack(avg_pred), torch.Tensor(speaker_labels).long())
-
+        
         ts_padded = target
         max_n_speakers = max(n_speakers)
         ts_padded = pad_labels(target, max_n_speakers)
