@@ -36,7 +36,7 @@ B: mini-batch size
 
 class AdMSoftmaxLoss(torch.nn.Module):
 
-    def __init__(self, in_features, out_features, s=30.0, m=0.4):
+    def __init__(self, in_features, out_features, device, s=30.0, m=0.4):
         '''
         AM Softmax Loss
         '''
@@ -45,7 +45,8 @@ class AdMSoftmaxLoss(torch.nn.Module):
         self.m = m
         self.in_features = in_features
         self.out_features = out_features
-        self.fc = torch.nn.Linear(in_features, out_features, bias=False)
+        self.device = device
+        self.fc = torch.nn.Linear(in_features, out_features, bias=False, device=device)
 
     def forward(self, x, labels):
         '''
@@ -379,7 +380,7 @@ class TransformerEDADiarization(Module):
         self.embedding = Linear(n_units, embed_dim, device=self.device)
         # self.metric = torch.nn.Sequential(torch.nn.ReLU(inplace=True),
         #                                   torch.nn.Linear(embed_dim, num_targets, device=self.device))
-        self.metric = AdMSoftmaxLoss(embed_dim, num_targets)
+        self.metric = AdMSoftmaxLoss(embed_dim, num_targets, device=self.device)
         # self.metric = AddMarginProduct(embed_dim, num_targets, device=device)
 
         self.eda = EncoderDecoderAttractor(
