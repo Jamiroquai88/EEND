@@ -4,6 +4,7 @@
 # Copyright 2022 Brno University of Technology (author: Federico Landini)
 # Licensed under the MIT license.
 import copy
+import time
 
 from backend.models_embeddings import (
     average_checkpoints,
@@ -94,9 +95,13 @@ def compute_loss_and_metrics(
     acum_metrics: Dict[str, float]
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     n_speakers = np.asarray([t.shape[1] for t in labels])
+    start_time = time.time()
     y_pred, attractor_loss, speaker_pred = model(input, labels, args)
+    print(f'model forward took {time.time() - start_time}')
+    start_time = time.time()
     loss, standard_loss, ce_loss = model.get_loss(
         y_pred, labels, n_speakers, attractor_loss, speaker_pred, speakers)
+    print(f'get loss took {time.time() - start_time}')
     metrics = calculate_metrics(
         labels.detach(), y_pred.detach(), threshold=0.5)
     acum_metrics = update_metrics(acum_metrics, metrics)
@@ -330,6 +335,7 @@ if __name__ == '__main__':
     for epoch in range(init_epoch, args.max_epochs):
         model.train()
         for i, batch in enumerate(train_loader):
+            batch_start = time.time()
             features = batch['xs']
             labels = batch['ts']
             speakers = batch['speakers']
@@ -352,9 +358,12 @@ if __name__ == '__main__':
                     epoch * train_batches_qty + i)
                 acum_train_metrics = reset_metrics(acum_train_metrics)
             optimizer.zero_grad()
+            backward_time = time.time()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.gradclip)
             optimizer.step()
+            print(f'backward took {time.time() - backward_time}')
+            print(f'batch {i} took {time.time() - batch_start}')
 
         save_checkpoint(args, epoch+1, model, optimizer, loss)
 
