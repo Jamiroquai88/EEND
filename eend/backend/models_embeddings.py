@@ -34,6 +34,40 @@ B: mini-batch size
 """
 
 
+class AdMSoftmaxLoss(torch.nn.Module):
+
+    def __init__(self, in_features, out_features, s=30.0, m=0.4):
+        '''
+        AM Softmax Loss
+        '''
+        super(AdMSoftmaxLoss, self).__init__()
+        self.s = s
+        self.m = m
+        self.in_features = in_features
+        self.out_features = out_features
+        self.fc = torch.nn.Linear(in_features, out_features, bias=False)
+
+    def forward(self, x, labels):
+        '''
+        input shape (N, in_features)
+        '''
+        assert len(x) == len(labels)
+        assert torch.min(labels) >= 0
+        assert torch.max(labels) < self.out_features
+
+        for W in self.fc.parameters():
+            W = F.normalize(W, dim=1)
+
+        x = F.normalize(x, dim=1)
+
+        wf = self.fc(x)
+        numerator = self.s * (torch.diagonal(wf.transpose(0, 1)[labels]) - self.m)
+        excl = torch.cat([torch.cat((wf[i, :y], wf[i, y + 1:])).unsqueeze(0) for i, y in enumerate(labels)], dim=0)
+        denominator = torch.exp(numerator) + torch.sum(torch.exp(self.s * excl), dim=1)
+        L = numerator - torch.log(denominator)
+        return -torch.mean(L)
+
+
 class EncoderDecoderAttractor(Module):
     def __init__(
         self,
@@ -343,8 +377,9 @@ class TransformerEDADiarization(Module):
         )
 
         self.embedding = Linear(n_units, embed_dim, device=self.device)
-        self.metric = torch.nn.Sequential(torch.nn.ReLU(inplace=True),
-                                          torch.nn.Linear(embed_dim, num_targets, device=self.device))
+        # self.metric = torch.nn.Sequential(torch.nn.ReLU(inplace=True),
+        #                                   torch.nn.Linear(embed_dim, num_targets, device=self.device))
+        self.metric = AdMSoftmaxLoss(embed_dim, num_targets)
         # self.metric = AddMarginProduct(embed_dim, num_targets, device=device)
 
         self.eda = EncoderDecoderAttractor(
@@ -429,7 +464,7 @@ class TransformerEDADiarization(Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         n_speakers = [t.shape[1] for t in ts]
         emb = self.get_embeddings(xs)
-        speaker_pred = self.metric(emb)
+
         # pooling_mean = torch.mean(emb, dim=1)
         # meansq = torch.mean(emb * emb, dim=1)
         # pooling_std = torch.sqrt(meansq - pooling_mean ** 2 + 1e-10)
@@ -450,7 +485,7 @@ class TransformerEDADiarization(Module):
 
         # ys: [(T, C), ...]
         ys = torch.matmul(emb, attractors.permute(0, 2, 1))
-        return ys, attractor_loss, speaker_pred
+        return ys, attractor_loss, emb
 
     def get_loss(
         self,
@@ -470,7 +505,8 @@ class TransformerEDADiarization(Module):
         speakers = speakers.argmax(dim=2).flatten()
 
         # compute cross entropy loss for speaker predictions
-        ce_loss = torch.nn.CrossEntropyLoss()(speaker_pred, speakers)
+        am_loss = self.metric(speaker_pred ,speakers)
+        # ce_loss = torch.nn.CrossEntropyLoss()(speaker_pred, speakers)
 
         ts_padded = target
         max_n_speakers = max(n_speakers)
@@ -481,7 +517,7 @@ class TransformerEDADiarization(Module):
             self.device, ys_padded, ts_padded, n_speakers)
         loss = standard_loss(ys_padded, labels.float())
 
-        return loss + attractor_loss * self.attractor_loss_ratio + ce_loss, loss, ce_loss
+        return loss + attractor_loss * self.attractor_loss_ratio + am_loss, loss, am_loss
 
 
 def pad_labels(ts: torch.Tensor, out_size: int) -> torch.Tensor:

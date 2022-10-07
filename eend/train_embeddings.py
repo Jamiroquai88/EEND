@@ -99,7 +99,7 @@ def compute_loss_and_metrics(
     y_pred, attractor_loss, speaker_pred = model(input, labels, args)
     print(f'model forward took {time.time() - start_time}')
     start_time = time.time()
-    loss, standard_loss, ce_loss = model.get_loss(
+    loss, standard_loss, am_loss = model.get_loss(
         y_pred, labels, n_speakers, attractor_loss, speaker_pred, speakers)
     print(f'get loss took {time.time() - start_time}')
     metrics = calculate_metrics(
@@ -108,8 +108,8 @@ def compute_loss_and_metrics(
     acum_metrics['loss'] += loss.detach()
     acum_metrics['loss_standard'] += standard_loss.detach()
     acum_metrics['loss_attractor'] += attractor_loss.detach()
-    acum_metrics['loss_ce']  += ce_loss.detach()
-    print(f'loss_standard: {standard_loss}, loss_attractor: {attractor_loss}, loss_ce: {ce_loss}, loss: {loss}')
+    acum_metrics['loss_am']  += am_loss.detach()
+    print(f'loss_standard: {standard_loss}, loss_attractor: {attractor_loss}, loss_am: {am_loss}, loss: {loss}')
     return loss, acum_metrics
 
 
