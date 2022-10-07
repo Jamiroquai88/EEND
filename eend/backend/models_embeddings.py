@@ -495,7 +495,9 @@ class TransformerEDADiarization(Module):
                 avg_pred.append(torch.mean(speaker_pred[start:end, :], dim=0))
 
         # compute cross entropy loss for speaker predictions
-        ce_loss = torch.nn.CrossEntropyLoss()(torch.stack(avg_pred), torch.Tensor(speaker_labels).long())
+        print()
+        ce_loss = torch.nn.CrossEntropyLoss()(torch.stack(avg_pred).to(self.device),
+                                              torch.Tensor(speaker_labels).long().to(self.device))
 
         ts_padded = target
         max_n_speakers = max(n_speakers)
