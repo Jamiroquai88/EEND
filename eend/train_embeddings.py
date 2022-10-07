@@ -96,11 +96,12 @@ def compute_loss_and_metrics(
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     n_speakers = np.asarray([t.shape[1] for t in labels])
     start_time = time.time()
-    y_pred, attractor_loss, speaker_pred = model(input, labels, args)
+    y_pred, attractor_loss, am_loss = model(input, labels, speakers, args)
     print(f'model forward took {time.time() - start_time}')
     start_time = time.time()
-    loss, standard_loss, am_loss = model.get_loss(
-        y_pred, labels, n_speakers, attractor_loss, speaker_pred, speakers)
+    loss, standard_loss = model.get_loss(
+        y_pred, labels, n_speakers, attractor_loss)
+    loss += am_loss
     print(f'get loss took {time.time() - start_time}')
     metrics = calculate_metrics(
         labels.detach(), y_pred.detach(), threshold=0.5)

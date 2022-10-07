@@ -461,11 +461,19 @@ class TransformerEDADiarization(Module):
         self,
         xs: torch.Tensor,
         ts: torch.Tensor,
+        labels: torch.Tensor,
         args: SimpleNamespace
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         n_speakers = [t.shape[1] for t in ts]
         emb = self.get_embeddings(xs)
+        # dimensionality is (batch, input_size, num_targets)
+        # to compute CE loss we need to flatten
+        speaker_pred = emb.flatten(0, 1)
 
+        # dimensionality is (batch, input_size, num_targets) - one hot
+        # take max from last dimension and flatten to match prediction
+        speakers = labels.argmax(dim=2).flatten()
+        am_loss = self.metric(speaker_pred, speakers)
         # pooling_mean = torch.mean(emb, dim=1)
         # meansq = torch.mean(emb * emb, dim=1)
         # pooling_std = torch.sqrt(meansq - pooling_mean ** 2 + 1e-10)
@@ -486,27 +494,24 @@ class TransformerEDADiarization(Module):
 
         # ys: [(T, C), ...]
         ys = torch.matmul(emb, attractors.permute(0, 2, 1))
-        return ys, attractor_loss, emb
+        return ys, attractor_loss, am_loss
 
     def get_loss(
         self,
         ys: torch.Tensor,
         target: torch.Tensor,
         n_speakers: List[int],
-        attractor_loss: torch.Tensor,
-        speaker_pred: torch.Tensor,
-        speakers: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # dimensionality is (batch, input_size, num_targets)
-        # to compute CE loss we need to flatten
-        speaker_pred = speaker_pred.flatten(0, 1)
-
-        # dimensionality is (batch, input_size, num_targets) - one hot
-        # take max from last dimension and flatten to match prediction
-        speakers = speakers.argmax(dim=2).flatten()
+        attractor_loss: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # # dimensionality is (batch, input_size, num_targets)
+        # # to compute CE loss we need to flatten
+        # speaker_pred = speaker_pred.flatten(0, 1)
+        #
+        # # dimensionality is (batch, input_size, num_targets) - one hot
+        # # take max from last dimension and flatten to match prediction
+        # speakers = speakers.argmax(dim=2).flatten()
 
         # compute cross entropy loss for speaker predictions
-        am_loss = self.metric(speaker_pred ,speakers)
         # ce_loss = torch.nn.CrossEntropyLoss()(speaker_pred, speakers)
 
         ts_padded = target
@@ -518,7 +523,7 @@ class TransformerEDADiarization(Module):
             self.device, ys_padded, ts_padded, n_speakers)
         loss = standard_loss(ys_padded, labels.float())
 
-        return loss + attractor_loss * self.attractor_loss_ratio + am_loss, loss, am_loss
+        return loss + attractor_loss * self.attractor_loss_ratio, loss
 
 
 def pad_labels(ts: torch.Tensor, out_size: int) -> torch.Tensor:
