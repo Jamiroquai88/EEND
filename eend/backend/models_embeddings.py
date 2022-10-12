@@ -552,10 +552,9 @@ def save_checkpoint(
     loss: torch.Tensor
 ) -> None:
     Path(f"{args.output_path}/models").mkdir(parents=True, exist_ok=True)
-
     torch.save({
         'epoch': epoch,
-        'model_state_dict': model.state_dict(),
+        'model_state_dict': model.module.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'loss': loss},
         f"{args.output_path}/models/checkpoint_{epoch}.tar"

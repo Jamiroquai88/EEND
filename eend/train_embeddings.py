@@ -6,6 +6,9 @@
 import copy
 import time
 
+from torch.distributed import init_process_group, destroy_process_group
+from torch.nn.parallel import DistributedDataParallel
+
 from backend.models_embeddings import (
     average_checkpoints,
     get_model,
@@ -21,7 +24,7 @@ from common_utils.metrics import (
     reset_metrics,
     update_metrics,
 )
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple
@@ -35,6 +38,10 @@ import wandb
 
 
 torch.set_num_threads(8)
+
+
+def ddp_setup(rank, world_size):
+    init_process_group(backend='nccl', rank=rank, world_size=world_size)
 
 
 def _init_fn(worker_id):
@@ -138,8 +145,8 @@ def get_training_dataloaders(
         batch_size=args.train_batchsize,
         collate_fn=_convert,
         num_workers=args.num_workers,
-        shuffle=True,
         worker_init_fn=_init_fn,
+        sampler=DistributedSampler(train_set)
     )
 
     dev_set = KaldiDiarizationDataset(
@@ -163,8 +170,8 @@ def get_training_dataloaders(
         batch_size=args.dev_batchsize,
         collate_fn=_convert,
         num_workers=1,
-        shuffle=False,
         worker_init_fn=_init_fn,
+        sampler=DistributedSampler(dev_set)
     )
 
     Y_train, _, _, _ = train_set.__getitem__(0)
@@ -192,8 +199,8 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--feature-dim', type=int)
     parser.add_argument('--frame-shift', type=int)
     parser.add_argument('--frame-size', type=int)
-    parser.add_argument('--gpu', '-g', default=-1, type=int,
-                        help='GPU ID (negative value indicates CPU)')
+    parser.add_argument('--gpu', '-g', default=-1, type=list,
+                        help='GPU ID(s) as list (negative value indicates CPU)')
     parser.add_argument('--gradclip', default=-1, type=int,
                         help='gradient clipping. if < 0, no clipping')
     parser.add_argument('--hidden-size', type=int,
@@ -263,8 +270,13 @@ def parse_arguments() -> SimpleNamespace:
     return args
 
 
+
 if __name__ == '__main__':
     args = parse_arguments()
+    world_size = len(args.gpu)
+
+    rank = int(os.environ['LOCAL_RANK'])
+    ddp_setup(rank, world_size)
 
     # For reproducibility
     torch.manual_seed(args.seed)
@@ -294,13 +306,14 @@ if __name__ == '__main__':
 
     train_loader, dev_loader = get_training_dataloaders(args)
 
-    if args.gpu >= 1:
-        gpuid = use_single_gpu(args.gpu)
-        logging.info('GPU device {} is used'.format(gpuid))
-        args.device = torch.device("cuda")
-    else:
+    if args.gpu == [-1]:
         gpuid = -1
         args.device = torch.device("cpu")
+    else:
+        # gpuid = use_single_gpu(args.gpu)
+        gpuid = args.gpu[rank]
+        logging.info('GPU device {} is used'.format(gpuid))
+        args.device = torch.device(f"cuda:{gpuid}")
 
     if args.init_model_path == '':
         model = get_model(args)
@@ -333,8 +346,14 @@ if __name__ == '__main__':
         # Save initial model
         save_checkpoint(args, init_epoch, model, optimizer, 0)
 
+    if args.gpu == [-1]:
+        # do not use gpu
+        model_ddp = model
+    else:
+        model_ddp = DistributedDataParallel(model, device_ids=args.gpu)
+
     for epoch in range(init_epoch, args.max_epochs):
-        model.train()
+        model_ddp.train()
         for i, batch in enumerate(train_loader):
             batch_start = time.time()
             features = batch['xs']
@@ -345,7 +364,7 @@ if __name__ == '__main__':
             labels = torch.stack(labels).to(args.device)
             speakers = torch.stack(speakers).to(args.device)
             loss, acum_train_metrics = compute_loss_and_metrics(
-                model, labels, features, speakers, acum_train_metrics)
+                model_ddp, labels, features, speakers, acum_train_metrics)
             if i % args.log_report_batches_num == \
                     (args.log_report_batches_num-1):
                 for k in acum_train_metrics.keys():
@@ -361,15 +380,16 @@ if __name__ == '__main__':
             optimizer.zero_grad()
             backward_time = time.time()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.gradclip)
+            torch.nn.utils.clip_grad_norm_(model_ddp.parameters(), args.gradclip)
             optimizer.step()
             # print(f'backward took {time.time() - backward_time}')
             # print(f'batch {i} took {time.time() - batch_start}')
 
-        save_checkpoint(args, epoch+1, model, optimizer, loss)
+        if rank == 0:
+            save_checkpoint(args, epoch+1, model_ddp, optimizer, loss)
 
         with torch.no_grad():
-            model.eval()
+            model_ddp.eval()
             for i, batch in enumerate(dev_loader):
                 features = batch['xs']
                 labels = batch['ts']
@@ -379,7 +399,7 @@ if __name__ == '__main__':
                 labels = torch.stack(labels).to(args.device)
                 speakers = torch.stack(speakers).to(args.device)
                 _, acum_dev_metrics = compute_loss_and_metrics(
-                    model, labels, features, speakers, acum_dev_metrics)
+                    model_ddp, labels, features, speakers, acum_dev_metrics)
         wandb_log = {'epoch': epoch}
         for k in acum_dev_metrics.keys():
             if isinstance(acum_dev_metrics[k], float):
@@ -393,3 +413,5 @@ if __name__ == '__main__':
                 epoch * dev_batches_qty + i)
         wandb.log(wandb_log)
         acum_dev_metrics = reset_metrics(acum_dev_metrics)
+
+    destroy_process_group()
