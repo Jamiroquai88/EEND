@@ -106,7 +106,7 @@ def compute_loss_and_metrics(
     y_pred, attractor_loss, am_loss = model(input, labels, speakers, args)
     # print(f'model forward took {time.time() - start_time}')
     start_time = time.time()
-    loss, standard_loss = model.get_loss(
+    loss, standard_loss = model.module.get_loss(
         y_pred, labels, n_speakers, attractor_loss)
     loss += am_loss
     # print(f'get loss took {time.time() - start_time}')
@@ -294,15 +294,16 @@ if __name__ == '__main__':
 
     writer = SummaryWriter(f"{args.output_path}/tensorboard")
 
-    wandb.login(
-        host="http://wandb.speech-rnd.internal",
-        key="local-473ad2cf1f9ed9023faf837048e75943e1bbe7c5"
-    )
+    if rank == 0:
+        wandb.login(
+            host="http://wandb.speech-rnd.internal",
+            key="local-473ad2cf1f9ed9023faf837048e75943e1bbe7c5"
+        )
 
-    wandb.init(
-        project='Jan_DIAR-91',
-        config=args,
-    )
+        wandb.init(
+            project='Jan_DIAR-91',
+            config=args,
+        )
 
     train_loader, dev_loader = get_training_dataloaders(args)
 
@@ -343,14 +344,15 @@ if __name__ == '__main__':
         init_epoch = epoch + 1
     else:
         init_epoch = 0
-        # Save initial model
-        save_checkpoint(args, init_epoch, model, optimizer, 0)
+    #    # Save initial model
+    #    save_checkpoint(args, init_epoch, model, optimizer, 0)
 
     if args.gpu == [-1]:
         # do not use gpu
         model_ddp = model
     else:
-        model_ddp = DistributedDataParallel(model, device_ids=args.gpu)
+        model_ddp = DistributedDataParallel(model, device_ids=[args.gpu[rank]], find_unused_parameters=True)
+        #model_ddp = DistributedDataParallel(model, device_ids=args.gpu)
 
     for epoch in range(init_epoch, args.max_epochs):
         model_ddp.train()
@@ -411,7 +413,8 @@ if __name__ == '__main__':
                 f"dev_{k}",
                 metric,
                 epoch * dev_batches_qty + i)
-        wandb.log(wandb_log)
+        if rank == 0:
+            wandb.log(wandb_log)
         acum_dev_metrics = reset_metrics(acum_dev_metrics)
 
     destroy_process_group()

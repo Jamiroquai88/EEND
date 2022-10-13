@@ -159,7 +159,7 @@ class EncoderDecoderAttractor(Module):
                 device=torch.device("cuda"))
             labels = torch.from_numpy(np.asarray([
                 [1.0] * n_spk + [0.0] * (1 + max_n_speakers - n_spk)
-                for n_spk in n_speakers])).to(torch.device("cuda"))
+                for n_spk in n_speakers])).to(self.device)
 
         attractors = self.forward(xs, zeros)
         if self.detach_attractor_loss:
@@ -554,7 +554,7 @@ def save_checkpoint(
     Path(f"{args.output_path}/models").mkdir(parents=True, exist_ok=True)
     torch.save({
         'epoch': epoch,
-        'model_state_dict': model.module.state_dict(),
+        'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'loss': loss},
         f"{args.output_path}/models/checkpoint_{epoch}.tar"
