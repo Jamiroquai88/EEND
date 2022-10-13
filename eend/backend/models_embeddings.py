@@ -357,6 +357,7 @@ class TransformerEDADiarization(Module):
         attractor_encoder_dropout: float,
         attractor_decoder_dropout: float,
         detach_attractor_loss: bool,
+        metric_type='linear'
     ) -> None:
         """ Self-attention-based diarization model.
         Args:
@@ -378,9 +379,14 @@ class TransformerEDADiarization(Module):
         )
 
         self.embedding = Linear(n_units, embed_dim, device=self.device)
-        # self.metric = torch.nn.Sequential(torch.nn.ReLU(inplace=True),
-        #                                   torch.nn.Linear(embed_dim, num_targets, device=self.device))
-        self.metric = AdMSoftmaxLoss(embed_dim, num_targets, device=self.device)
+        self.metric_type = metric_type
+        if metric_type == 'linear':
+            self.metric = torch.nn.Sequential(torch.nn.ReLU(inplace=True),
+                                              torch.nn.Linear(embed_dim, num_targets, device=self.device))
+        elif metric_type == 'am':
+            self.metric = AdMSoftmaxLoss(embed_dim, num_targets, device=self.device)
+        else:
+            raise ValueError(f'Unexpected metric type {metric_type}')
         # self.metric = AddMarginProduct(embed_dim, num_targets, device=device)
 
         self.eda = EncoderDecoderAttractor(
@@ -420,7 +426,6 @@ class TransformerEDADiarization(Module):
         #    emb_chunks.append(self.get_embeddings(xs_chunk))
         #emb = torch.cat(emb_chunks, dim=1)
         emb = self.get_embeddings(xs)
-        speaker_pred = self.metric(emb)
 
         # pooling_mean = torch.mean(emb, dim=1)
         # meansq = torch.mean(emb * emb, dim=1)
@@ -453,7 +458,7 @@ class TransformerEDADiarization(Module):
                 NotImplementedError(
                     'estimate_spk_qty or estimate_spk_qty_thr needed.')
         if return_emb:
-            return ys_active, speaker_pred
+            return ys_active, emb
         else:
             return ys_active
 
@@ -473,8 +478,13 @@ class TransformerEDADiarization(Module):
         # dimensionality is (batch, input_size, num_targets) - one hot
         # take max from last dimension and flatten to match prediction
         speakers = labels.argmax(dim=2).flatten()
-        indexes = torch.randperm(speakers.shape[0])[:1000]
-        am_loss = self.metric(speaker_pred[indexes, :], speakers[indexes])
+        if self.metric_type == 'am':
+            indexes = torch.randperm(speakers.shape[0])[:1000]
+            spk_loss = self.metric(speaker_pred[indexes, :], speakers[indexes])
+        else:
+            speaker_pred = self.metric(speaker_pred)
+            spk_loss = torch.nn.CrossEntropyLoss()(speaker_pred, speakers)
+
         # pooling_mean = torch.mean(emb, dim=1)
         # meansq = torch.mean(emb * emb, dim=1)
         # pooling_std = torch.sqrt(meansq - pooling_mean ** 2 + 1e-10)
@@ -495,7 +505,7 @@ class TransformerEDADiarization(Module):
 
         # ys: [(T, C), ...]
         ys = torch.matmul(emb, attractors.permute(0, 2, 1))
-        return ys, attractor_loss, am_loss
+        return ys, attractor_loss, spk_loss
 
     def get_loss(
         self,
