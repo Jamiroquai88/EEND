@@ -19,6 +19,13 @@ def trim_wav(wav_path, output_wav_path, start, end):
     os.makedirs(os.path.dirname(output_wav_path), exist_ok=True)
     subprocess.check_call([f'sox {wav_path} {output_wav_path} trim {start} {end - start}'], shell=True)
 
+def parse_line(line, chunk_idx, chunk_size):
+    token, speaker, ts, endTs, punctuation, case, tags, wer_tags, oldTs, oldEndTs, ali_comment = line.split('|')
+    ts, endTs, oldTs, oldEndTs = float(ts), float(endTs), float(oldTs), float(oldEndTs)
+    ts, endTs, oldTs, oldEndTs = (x - chunk_idx * chunk_size for x in (ts, endTs, oldTs, oldEndTs))
+    ali_comment = ali_comment.rstrip()
+    return token, speaker, ts, endTs, punctuation, case, tags, wer_tags, oldTs, oldEndTs, ali_comment
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('input_kaldi_dir', type=Path, help='path to input kaldi directory')
@@ -67,25 +74,28 @@ if __name__ == '__main__':
             with input_aligned_nlp.open() as finnlp:
                 header = finnlp.readline()
                 old_line = None
-                for chunk_start in np.arange(0, dur, args.chunk_size):
+                for chunk_idx, chunk_start in enumerate(np.arange(0, dur, args.chunk_size)):
                     chunk_end = chunk_start + args.chunk_size if chunk_start + args.chunk_size < dur else dur
                     chunk_name = f'{wav}_{int(chunk_start * 100):08d}-{int(chunk_end * 100):08d}'
                     with (args.output_wer_dir / f'{chunk_name}.aligned.nlp').open('w') as foutnlp:
                         foutnlp.write(header)
                         if old_line is not None:
-                            foutnlp.write(old_line)
+                            token, speaker, ts, endTs, punctuation, case, tags, wer_tags, oldTs, oldEndTs, ali_comment = parse_line(
+                                line, chunk_idx, args.chunk_size)
+                            foutnlp.write(
+                                f'{token}|{speaker}|{ts:.3f}|{endTs:.3f}|{punctuation}|{case}|{tags}|{wer_tags}|{oldTs:.3f}|{oldEndTs:.3f}|{ali_comment}\n')
                             old_line = None
 
                         for line in finnlp:
                             try:
-                                end = float(line.split('|')[3])
-                            except ValueError:
+                                token, speaker, ts, endTs, punctuation, case, tags, wer_tags, oldTs, oldEndTs, ali_comment = parse_line(line, chunk_idx, args.chunk_size)
+                            except ValueError:  # this means that conversion to float did not suceed
                                 foutnlp.write(line)
                                 continue
-                            if end > chunk_end:
+                            if ts + chunk_idx * args.chunk_size > chunk_end:
                                 old_line = line
                                 break
                             else:
-                                foutnlp.write(line)
+                                foutnlp.write(f'{token}|{speaker}|{ts:.3f}|{endTs:.3f}|{punctuation}|{case}|{tags}|{wer_tags}|{oldTs:.3f}|{oldEndTs:.3f}|{ali_comment}\n')
 
 
