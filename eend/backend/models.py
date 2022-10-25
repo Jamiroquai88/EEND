@@ -124,7 +124,7 @@ class EncoderDecoderAttractor(Module):
                 device=torch.device("cuda"))
             labels = torch.from_numpy(np.asarray([
                 [1.0] * n_spk + [0.0] * (1 + max_n_speakers - n_spk)
-                for n_spk in n_speakers])).to(torch.device("cuda"))
+                for n_spk in n_speakers])).to(self.device)
 
         attractors = self.forward(xs, zeros)
         if self.detach_attractor_loss:
@@ -132,12 +132,12 @@ class EncoderDecoderAttractor(Module):
         logit = torch.cat([
             torch.reshape(self.counter(att), (-1, max_n_speakers + 1))
             for att, n_spk in zip(attractors, n_speakers)])
+        print(self.device, logit.get_device(), labels.get_device())
         loss = F.binary_cross_entropy_with_logits(logit, labels)
 
         # The final attractor does not correspond to a speaker so remove it
         attractors = attractors[:, :-1, :]
         return loss, attractors
-
 
 class MultiHeadSelfAttention(Module):
     """ Multi head self-attention layer
