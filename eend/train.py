@@ -123,7 +123,6 @@ def get_training_dataloaders(
         batch_size=args.train_batchsize,
         collate_fn=_convert,
         num_workers=args.num_workers,
-        shuffle=True,
         worker_init_fn=_init_fn,
         sampler=DistributedSampler(train_set)
     )
@@ -149,9 +148,8 @@ def get_training_dataloaders(
         batch_size=args.dev_batchsize,
         collate_fn=_convert,
         num_workers=1,
-        shuffle=False,
         worker_init_fn=_init_fn,
-        sampler=DistributedSampler(train_set)
+        sampler=DistributedSampler(dev_set)
     )
 
     Y_train, _, _ = train_set.__getitem__(0)
