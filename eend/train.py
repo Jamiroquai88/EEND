@@ -3,6 +3,8 @@
 # Copyright 2019 Hitachi, Ltd. (author: Yusuke Fujita)
 # Copyright 2022 Brno University of Technology (author: Federico Landini)
 # Licensed under the MIT license.
+import time
+
 import wandb
 
 from backend.models import (
@@ -329,6 +331,7 @@ if __name__ == '__main__':
     else:
         model_ddp = DistributedDataParallel(model, device_ids=[args.gpu[rank]], find_unused_parameters=True)
 
+    log_start = time.time()
     for epoch in range(init_epoch, args.max_epochs):
         model_ddp.train()
         for i, batch in enumerate(train_loader):
@@ -344,7 +347,9 @@ if __name__ == '__main__':
                 print(f'Step {i}, epoch {epoch}; '
                       f'loss_standard: {acum_train_metrics["loss_standard"] / args.log_report_batches_num}, '
                       f'loss_attractor: {acum_train_metrics["loss_attractor"] / args.log_report_batches_num}, '
-                      f'loss: {loss / args.log_report_batches_num}')
+                      f'loss: {loss / args.log_report_batches_num}, '
+                      f'took {time.time() - log_start}')
+                log_start = time.time()
                 for k in acum_train_metrics.keys():
                     writer.add_scalar(
                         f"train_{k}",
