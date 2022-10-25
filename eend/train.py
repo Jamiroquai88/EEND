@@ -3,7 +3,7 @@
 # Copyright 2019 Hitachi, Ltd. (author: Yusuke Fujita)
 # Copyright 2022 Brno University of Technology (author: Federico Landini)
 # Licensed under the MIT license.
-
+import wandb
 
 from backend.models import (
     average_checkpoints,
@@ -13,15 +13,16 @@ from backend.models import (
 )
 from backend.updater import setup_optimizer, get_rate
 from common_utils.diarization_dataset import KaldiDiarizationDataset
-from common_utils.gpu_utils import use_single_gpu
 from common_utils.metrics import (
     calculate_metrics,
     new_metrics,
     reset_metrics,
     update_metrics,
 )
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
+from torch.distributed import init_process_group, destroy_process_group
+from torch.nn.parallel import DistributedDataParallel
 from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple
 import numpy as np
@@ -37,6 +38,9 @@ def _init_fn(worker_id):
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
+
+def ddp_setup(rank, world_size):
+    init_process_group(backend='nccl', rank=rank, world_size=world_size)
 
 def pad_sequence(
     features: List[torch.Tensor],
@@ -112,6 +116,7 @@ def get_training_dataloaders(
         subsampling=args.subsampling,
         use_last_samples=args.use_last_samples,
         min_length=args.min_length,
+        return_speaker=False
     )
     train_loader = DataLoader(
         train_set,
@@ -120,6 +125,7 @@ def get_training_dataloaders(
         num_workers=args.num_workers,
         shuffle=True,
         worker_init_fn=_init_fn,
+        sampler=DistributedSampler(train_set)
     )
 
     dev_set = KaldiDiarizationDataset(
@@ -136,6 +142,7 @@ def get_training_dataloaders(
         subsampling=args.subsampling,
         use_last_samples=args.use_last_samples,
         min_length=args.min_length,
+        return_speaker=False
     )
     dev_loader = DataLoader(
         dev_set,
@@ -144,6 +151,7 @@ def get_training_dataloaders(
         num_workers=1,
         shuffle=False,
         worker_init_fn=_init_fn,
+        sampler=DistributedSampler(train_set)
     )
 
     Y_train, _, _ = train_set.__getitem__(0)
@@ -171,8 +179,6 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--feature-dim', type=int)
     parser.add_argument('--frame-shift', type=int)
     parser.add_argument('--frame-size', type=int)
-    parser.add_argument('--gpu', '-g', default=-1, type=int,
-                        help='GPU ID (negative value indicates CPU)')
     parser.add_argument('--gradclip', default=-1, type=int,
                         help='gradient clipping. if < 0, no clipping')
     parser.add_argument('--hidden-size', type=int,
@@ -217,6 +223,8 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--use-last-samples', default=True, type=bool)
     parser.add_argument('--valid-data-dir',
                         help='kaldi-style data dir used for validation.')
+    parser.add_argument('--gpu', '-g', default=-1, type=list,
+                        help='GPU ID(s) as list (negative value indicates CPU)')
 
     attractor_args = parser.add_argument_group('attractor')
     attractor_args.add_argument(
@@ -239,6 +247,11 @@ def parse_arguments() -> SimpleNamespace:
 if __name__ == '__main__':
     args = parse_arguments()
 
+    # ddp setup
+    world_size = len(args.gpu)
+    rank = int(os.environ['LOCAL_RANK'])
+    ddp_setup(rank, world_size)
+
     # For reproducibility
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
@@ -255,15 +268,27 @@ if __name__ == '__main__':
 
     writer = SummaryWriter(f"{args.output_path}/tensorboard")
 
+    if rank == 0:
+        wandb.login(
+            host="http://wandb.speech-rnd.internal",
+            key="local-473ad2cf1f9ed9023faf837048e75943e1bbe7c5"
+        )
+
+        wandb.init(
+            project='Jan_DIAR-91',
+            config=args,
+        )
+
     train_loader, dev_loader = get_training_dataloaders(args)
 
-    if args.gpu >= 1:
-        gpuid = use_single_gpu(args.gpu)
-        logging.info('GPU device {} is used'.format(gpuid))
-        args.device = torch.device("cuda")
-    else:
+    if args.gpu == [-1]:
         gpuid = -1
         args.device = torch.device("cpu")
+    else:
+        # gpuid = use_single_gpu(args.gpu)
+        gpuid = args.gpu[rank]
+        logging.info('GPU device {} is used'.format(gpuid))
+        args.device = torch.device(f"cuda:{gpuid}")
 
     if args.init_model_path == '':
         model = get_model(args)
@@ -294,10 +319,16 @@ if __name__ == '__main__':
     else:
         init_epoch = 0
         # Save initial model
-        save_checkpoint(args, init_epoch, model, optimizer, 0)
+        # save_checkpoint(args, init_epoch, model, optimizer, 0)
+
+    if args.gpu == [-1]:
+        # do not use gpu
+        model_ddp = model
+    else:
+        model_ddp = DistributedDataParallel(model, device_ids=[args.gpu[rank]], find_unused_parameters=True)
 
     for epoch in range(init_epoch, args.max_epochs):
-        model.train()
+        model_ddp.train()
         for i, batch in enumerate(train_loader):
             features = batch['xs']
             labels = batch['ts']
@@ -305,9 +336,13 @@ if __name__ == '__main__':
             features = torch.stack(features).to(args.device)
             labels = torch.stack(labels).to(args.device)
             loss, acum_train_metrics = compute_loss_and_metrics(
-                model, labels, features, acum_train_metrics)
+                model_ddp, labels, features, acum_train_metrics)
             if i % args.log_report_batches_num == \
                     (args.log_report_batches_num-1):
+                print(f'Step {i}, epoch {epoch}; '
+                      f'loss_standard: {acum_train_metrics["loss_standard"] / args.log_report_batches_num}, '
+                      f'loss_attractor: {acum_train_metrics["loss_attractor"] / args.log_report_batches_num}, '
+                      f'loss: {loss / args.log_report_batches_num}')
                 for k in acum_train_metrics.keys():
                     writer.add_scalar(
                         f"train_{k}",
@@ -320,13 +355,14 @@ if __name__ == '__main__':
                 acum_train_metrics = reset_metrics(acum_train_metrics)
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.gradclip)
+            torch.nn.utils.clip_grad_norm_(model_ddp.parameters(), args.gradclip)
             optimizer.step()
 
-        save_checkpoint(args, epoch+1, model, optimizer, loss)
+        if rank == 0:
+            save_checkpoint(args, epoch+1, model_ddp, optimizer, loss)
 
         with torch.no_grad():
-            model.eval()
+            model_ddp.eval()
             for i, batch in enumerate(dev_loader):
                 features = batch['xs']
                 labels = batch['ts']
@@ -335,9 +371,20 @@ if __name__ == '__main__':
                 features = torch.stack(features).to(args.device)
                 labels = torch.stack(labels).to(args.device)
                 _, acum_dev_metrics = compute_loss_and_metrics(
-                    model, labels, features, acum_dev_metrics)
-        for k in acum_dev_metrics.keys():
-            writer.add_scalar(
-                f"dev_{k}", acum_dev_metrics[k] / dev_batches_qty,
-                epoch * dev_batches_qty + i)
+                    model_ddp, labels, features, acum_dev_metrics)
+        if rank == 0:
+            wandb_log = {'epoch': epoch}
+            for k in acum_dev_metrics.keys():
+                if isinstance(acum_dev_metrics[k], float):
+                    metric = acum_dev_metrics[k] / dev_batches_qty
+                elif isinstance(acum_dev_metrics[k], torch.Tensor):
+                    metric = acum_dev_metrics[k].mean() / dev_batches_qty
+                wandb_log[f'dev_{k}'] = metric
+                writer.add_scalar(
+                    f"dev_{k}",
+                    metric,
+                    epoch * dev_batches_qty + i)
+            wandb.log(wandb_log)
         acum_dev_metrics = reset_metrics(acum_dev_metrics)
+
+    destroy_process_group()
