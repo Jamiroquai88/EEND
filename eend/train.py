@@ -124,7 +124,8 @@ def get_training_dataloaders(
         collate_fn=_convert,
         num_workers=args.num_workers,
         worker_init_fn=_init_fn,
-        sampler=DistributedSampler(train_set)
+        sampler=DistributedSampler(train_set),
+        prefetch_factor=10
     )
 
     dev_set = KaldiDiarizationDataset(
@@ -149,7 +150,8 @@ def get_training_dataloaders(
         collate_fn=_convert,
         num_workers=1,
         worker_init_fn=_init_fn,
-        sampler=DistributedSampler(dev_set)
+        sampler=DistributedSampler(dev_set),
+        prefetch_factor=10
     )
 
     Y_train, _, _ = train_set.__getitem__(0)
