@@ -132,7 +132,6 @@ class EncoderDecoderAttractor(Module):
         logit = torch.cat([
             torch.reshape(self.counter(att), (-1, max_n_speakers + 1))
             for att, n_spk in zip(attractors, n_speakers)])
-        print(self.device, logit.get_device(), labels.get_device())
         loss = F.binary_cross_entropy_with_logits(logit, labels)
 
         # The final attractor does not correspond to a speaker so remove it
