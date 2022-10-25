@@ -483,6 +483,7 @@ def average_checkpoints(
     states_dict_list = []
     for e in epochs:
         copy_model = copy.deepcopy(model)
+        print(f'Loading checkpoint from path {join(models_path, f"checkpoint_{e}.tar")} to {device}')
         checkpoint = torch.load(join(
             models_path,
             f"checkpoint_{e}.tar"), map_location=device)
