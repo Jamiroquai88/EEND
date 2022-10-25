@@ -88,7 +88,7 @@ def compute_loss_and_metrics(
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     n_speakers = np.asarray([t.shape[1] for t in labels])
     y_pred, attractor_loss = model(input, labels, args)
-    loss, standard_loss = model.get_loss(
+    loss, standard_loss = model.module.get_loss(
         y_pred, labels, n_speakers, attractor_loss)
     metrics = calculate_metrics(
         labels.detach(), y_pred.detach(), threshold=0.5)
