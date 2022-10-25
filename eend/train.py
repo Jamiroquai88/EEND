@@ -34,7 +34,7 @@ import torch
 import logging
 import yamlargparse
 
-torch.set_num_threads(8)
+torch.set_num_threads(4)
 
 
 def _init_fn(worker_id):
@@ -344,11 +344,12 @@ if __name__ == '__main__':
                 model_ddp, labels, features, acum_train_metrics)
             if i % args.log_report_batches_num == \
                     (args.log_report_batches_num-1):
-                print(f'Step {i}, epoch {epoch}; '
-                      f'loss_standard: {acum_train_metrics["loss_standard"] / args.log_report_batches_num}, '
-                      f'loss_attractor: {acum_train_metrics["loss_attractor"] / args.log_report_batches_num}, '
-                      f'loss: {loss / args.log_report_batches_num}, '
-                      f'took {time.time() - log_start:.2f} seconds')
+                if rank == 0:
+                    print(f'Step {i}, epoch {epoch}; '
+                          f'loss_standard: {acum_train_metrics["loss_standard"] / args.log_report_batches_num}, '
+                          f'loss_attractor: {acum_train_metrics["loss_attractor"] / args.log_report_batches_num}, '
+                          f'loss: {loss / args.log_report_batches_num}, '
+                          f'took {time.time() - log_start:.2f} seconds')
                 log_start = time.time()
                 for k in acum_train_metrics.keys():
                     writer.add_scalar(
