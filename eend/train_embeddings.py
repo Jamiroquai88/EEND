@@ -3,11 +3,13 @@
 # Copyright 2019 Hitachi, Ltd. (author: Yusuke Fujita)
 # Copyright 2022 Brno University of Technology (author: Federico Landini)
 # Licensed under the MIT license.
+import copy
 import time
 
-import wandb
+from torch.distributed import init_process_group, destroy_process_group
+from torch.nn.parallel import DistributedDataParallel
 
-from backend.models import (
+from backend.models_embeddings import (
     average_checkpoints,
     get_model,
     load_checkpoint,
@@ -15,6 +17,7 @@ from backend.models import (
 )
 from backend.updater import setup_optimizer, get_rate
 from common_utils.diarization_dataset import KaldiDiarizationDataset
+from common_utils.gpu_utils import use_single_gpu
 from common_utils.metrics import (
     calculate_metrics,
     new_metrics,
@@ -23,8 +26,6 @@ from common_utils.metrics import (
 )
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
-from torch.distributed import init_process_group, destroy_process_group
-from torch.nn.parallel import DistributedDataParallel
 from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple
 import numpy as np
@@ -35,7 +36,12 @@ import logging
 import yamlargparse
 import wandb
 
-torch.set_num_threads(4)
+
+torch.set_num_threads(8)
+
+
+def ddp_setup(rank, world_size):
+    init_process_group(backend='nccl', rank=rank, world_size=world_size)
 
 
 def _init_fn(worker_id):
@@ -44,23 +50,22 @@ def _init_fn(worker_id):
     random.seed(worker_seed)
 
 
-def ddp_setup(rank, world_size):
-    init_process_group(backend='nccl', rank=rank, world_size=world_size)
-
 def pad_sequence(
     features: List[torch.Tensor],
     labels: List[torch.Tensor],
+    speakers: List[torch.Tensor],
     seq_len: int
-) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
     features_padded = []
     labels_padded = []
-    assert len(features) == len(labels), (
-        f"Features and labels in batch were expected to match but got "
-        "{len(features)} features and {len(labels)} labels.")
+    speakers_padded = []
+    assert len(features) == len(labels) == len(speakers), (
+        f"Features, labels and speakers in batch were expected to match but got "
+        f"{len(features)} features, {len(labels)} labels and {len(speakers)}.")
     for i, _ in enumerate(features):
-        assert features[i].shape[0] == labels[i].shape[0], (
-            f"Length of features and labels were expected to match but got "
-            "{features[i].shape[0]} and {labels[i].shape[0]}")
+        assert features[i].shape[0] == labels[i].shape[0] == speakers[i].shape[0], (
+            f"Length of features, labels and speakers were expected to match but got "
+            f"{features[i].shape[0]}, {labels[i].shape[0]} and {speakers[i].shape[0]}")
         length = features[i].shape[0]
         if length < seq_len:
             extend = seq_len - length
@@ -68,39 +73,50 @@ def pad_sequence(
                 extend, features[i].shape[1]))), dim=0))
             labels_padded.append(torch.cat((labels[i], -torch.ones((
                 extend, labels[i].shape[1]))), dim=0))
+            speakers_padded.append(torch.cat((speakers[i], -torch.ones((
+                extend, speakers[i].shape[1]))), dim=0))
         elif length > seq_len:
             raise (f"Sequence of length {length} was received but only "
-                   "{seq_len} was expected.")
+                   f"{seq_len} was expected.")
         else:
             features_padded.append(features[i])
             labels_padded.append(labels[i])
-    return features_padded, labels_padded
+            speakers_padded.append(speakers[i])
+    return features_padded, labels_padded, speakers_padded
 
 
 def _convert(
     batch: List[Tuple[torch.Tensor, torch.Tensor, str]]
 ) -> Dict[str, Any]:
-    return {'xs': [x for x, _, _ in batch],
-            'ts': [t for _, t, _ in batch],
-            'names': [r for _, _, r in batch]}
+    return {'xs': [x for x, _, _, _ in batch],
+            'ts': [t for _, t, _, _ in batch],
+            'names': [r for _, _, r, _ in batch],
+            'speakers': [l for _, _, _, l in batch]}
 
 
 def compute_loss_and_metrics(
     model: torch.nn.Module,
     labels: torch.Tensor,
     input: torch.Tensor,
+    speakers: torch.Tensor,
     acum_metrics: Dict[str, float]
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     n_speakers = np.asarray([t.shape[1] for t in labels])
-    y_pred, attractor_loss = model(input, labels, args)
+    start_time = time.time()
+    y_pred, attractor_loss, spk_loss = model(input, labels, speakers, args)
+    # print(f'model forward took {time.time() - start_time}')
+    start_time = time.time()
     loss, standard_loss = model.module.get_loss(
         y_pred, labels, n_speakers, attractor_loss)
+    loss += spk_loss
+    # print(f'get loss took {time.time() - start_time}')
     metrics = calculate_metrics(
         labels.detach(), y_pred.detach(), threshold=0.5)
     acum_metrics = update_metrics(acum_metrics, metrics)
     acum_metrics['loss'] += loss.detach()
     acum_metrics['loss_standard'] += standard_loss.detach()
     acum_metrics['loss_attractor'] += attractor_loss.detach()
+    acum_metrics['loss_spk']  += spk_loss.detach()
     return loss, acum_metrics
 
 
@@ -121,7 +137,7 @@ def get_training_dataloaders(
         subsampling=args.subsampling,
         use_last_samples=args.use_last_samples,
         min_length=args.min_length,
-        return_speaker=False
+        return_speaker=args.return_speaker
     )
     train_loader = DataLoader(
         train_set,
@@ -129,8 +145,7 @@ def get_training_dataloaders(
         collate_fn=_convert,
         num_workers=args.num_workers,
         worker_init_fn=_init_fn,
-        sampler=DistributedSampler(train_set),
-        prefetch_factor=10
+        sampler=DistributedSampler(train_set)
     )
 
     dev_set = KaldiDiarizationDataset(
@@ -147,7 +162,7 @@ def get_training_dataloaders(
         subsampling=args.subsampling,
         use_last_samples=args.use_last_samples,
         min_length=args.min_length,
-        return_speaker=False
+        return_speaker=args.return_speaker
     )
     dev_loader = DataLoader(
         dev_set,
@@ -155,12 +170,11 @@ def get_training_dataloaders(
         collate_fn=_convert,
         num_workers=1,
         worker_init_fn=_init_fn,
-        sampler=DistributedSampler(dev_set),
-        prefetch_factor=10
+        sampler=DistributedSampler(dev_set)
     )
 
-    Y_train, _, _ = train_set.__getitem__(0)
-    Y_dev, _, _ = dev_set.__getitem__(0)
+    Y_train, _, _, _ = train_set.__getitem__(0)
+    Y_dev, _, _, _ = dev_set.__getitem__(0)
     assert Y_train.shape[1] == Y_dev.shape[1], \
         f"Train features dimensionality ({Y_train.shape[1]}) and \
         dev features dimensionality ({Y_dev.shape[1]}) differ."
@@ -184,8 +198,8 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--feature-dim', type=int)
     parser.add_argument('--frame-shift', type=int)
     parser.add_argument('--frame-size', type=int)
-    parser.add_argument('--gpu', '-g', default=-1, type=str,
-                        help='GPU ID (negative value indicates CPU)')
+    parser.add_argument('--gpu', '-g', default=-1, type=list,
+                        help='GPU ID(s) as list (negative value indicates CPU)')
     parser.add_argument('--gradclip', default=-1, type=int,
                         help='gradient clipping. if < 0, no clipping')
     parser.add_argument('--hidden-size', type=int,
@@ -230,8 +244,12 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--use-last-samples', default=True, type=bool)
     parser.add_argument('--valid-data-dir',
                         help='kaldi-style data dir used for validation.')
-    parser.add_argument('--gpu', '-g', default=-1, type=list,
-                        help='GPU ID(s) as list (negative value indicates CPU)')
+    parser.add_argument('--embed-dim', type=int,
+                        help='dimensionality of embedding layer')
+    parser.add_argument('--num-targets', type=int,
+                        help='number of targets to predict in additive margin')
+    parser.add_argument('--return-speaker', default=False, type=bool,
+                        help='return speaker label from utt2spk/spk2utt in data loader')
 
     attractor_args = parser.add_argument_group('attractor')
     attractor_args.add_argument(
@@ -251,11 +269,11 @@ def parse_arguments() -> SimpleNamespace:
     return args
 
 
+
 if __name__ == '__main__':
     args = parse_arguments()
-
-    # ddp setup
     world_size = len(args.gpu)
+
     rank = int(os.environ['LOCAL_RANK'])
     ddp_setup(rank, world_size)
 
@@ -325,56 +343,54 @@ if __name__ == '__main__':
         init_epoch = epoch + 1
     else:
         init_epoch = 0
-        # Save initial model
-        # save_checkpoint(args, init_epoch, model, optimizer, 0)
+    #    # Save initial model
+    #    save_checkpoint(args, init_epoch, model, optimizer, 0)
 
     if args.gpu == [-1]:
         # do not use gpu
         model_ddp = model
     else:
         model_ddp = DistributedDataParallel(model, device_ids=[args.gpu[rank]], find_unused_parameters=True)
-
-    log_start = time.time()
+        #model_ddp = DistributedDataParallel(model, device_ids=args.gpu)
 
     for epoch in range(init_epoch, args.max_epochs):
         model_ddp.train()
         for i, batch in enumerate(train_loader):
+            batch_start = time.time()
             features = batch['xs']
             labels = batch['ts']
-            features, labels = pad_sequence(features, labels, args.num_frames)
+            speakers = batch['speakers']
+            features, labels, speakers = pad_sequence(features, labels, speakers, args.num_frames)
             features = torch.stack(features).to(args.device)
             labels = torch.stack(labels).to(args.device)
+            speakers = torch.stack(speakers).to(args.device)
             loss, acum_train_metrics = compute_loss_and_metrics(
-                model_ddp, labels, features, acum_train_metrics)
-            if i % args.log_report_batches_num == \
-                    (args.log_report_batches_num-1):
-                if rank == 0:
+                model_ddp, labels, features, speakers, acum_train_metrics)
+            if rank == 0:
+                if i % args.log_report_batches_num == \
+                        (args.log_report_batches_num-1):
                     print(f'Step {i}, epoch {epoch}; '
                           f'loss_standard: {acum_train_metrics["loss_standard"] / args.log_report_batches_num}, '
                           f'loss_attractor: {acum_train_metrics["loss_attractor"] / args.log_report_batches_num}, '
-                          f'loss: {loss / args.log_report_batches_num}, '
-                          f'took {time.time() - log_start:.2f} seconds')
-                log_start = time.time()
-                for k in acum_train_metrics.keys():
-                    if isinstance(acum_train_metrics[k], float):
-                        metric = acum_train_metrics[k] / args.log_report_batches_num
-                    elif isinstance(acum_train_metrics[k], torch.Tensor):
-                        metric = acum_train_metrics[k].mean() / args.log_report_batches_num
+                          f'loss_spk: {acum_train_metrics["loss_spk"] / args.log_report_batches_num}, '
+                          f'loss: {loss / args.log_report_batches_num}')
+                    for k in acum_train_metrics.keys():
+                        writer.add_scalar(
+                            f"train_{k}",
+                            acum_train_metrics[k] / args.log_report_batches_num,
+                            epoch * train_batches_qty + i)
                     writer.add_scalar(
-                        f"train_{k}",
-                        metric,
+                        "lrate",
+                        get_rate(optimizer),
                         epoch * train_batches_qty + i)
-                writer.add_scalar(
-                    "lrate",
-                    get_rate(optimizer),
-                    epoch * train_batches_qty + i)
-                acum_train_metrics = reset_metrics(acum_train_metrics)
+                    acum_train_metrics = reset_metrics(acum_train_metrics)
             optimizer.zero_grad()
-
+            backward_time = time.time()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model_ddp.parameters(), args.gradclip)
-
             optimizer.step()
+            # print(f'backward took {time.time() - backward_time}')
+            # print(f'batch {i} took {time.time() - batch_start}')
 
         if rank == 0:
             save_checkpoint(args, epoch+1, model_ddp, optimizer, loss)
@@ -384,26 +400,26 @@ if __name__ == '__main__':
             for i, batch in enumerate(dev_loader):
                 features = batch['xs']
                 labels = batch['ts']
-                features, labels = pad_sequence(
-                    features, labels, args.num_frames)
+                speakers = batch['speakers']
+                features, labels, speakers = pad_sequence(features, labels, speakers, args.num_frames)
                 features = torch.stack(features).to(args.device)
                 labels = torch.stack(labels).to(args.device)
+                speakers = torch.stack(speakers).to(args.device)
                 _, acum_dev_metrics = compute_loss_and_metrics(
-                    model_ddp, labels, features, acum_dev_metrics)
+                    model_ddp, labels, features, speakers, acum_dev_metrics)
+        wandb_log = {'epoch': epoch}
+        for k in acum_dev_metrics.keys():
+            if isinstance(acum_dev_metrics[k], float):
+                metric = acum_dev_metrics[k] / dev_batches_qty
+            elif isinstance(acum_dev_metrics[k], torch.Tensor):
+                metric = acum_dev_metrics[k].mean() / dev_batches_qty
+            wandb_log[f'dev_{k}'] = metric
+            writer.add_scalar(
+                f"dev_{k}",
+                metric,
+                epoch * dev_batches_qty + i)
         if rank == 0:
-            wandb_log = {'epoch': epoch}
-            for k in acum_dev_metrics.keys():
-                if isinstance(acum_dev_metrics[k], float):
-                    metric = acum_dev_metrics[k] / dev_batches_qty
-                elif isinstance(acum_dev_metrics[k], torch.Tensor):
-                    metric = acum_dev_metrics[k].mean() / dev_batches_qty
-                wandb_log[f'dev_{k}'] = metric
-                writer.add_scalar(
-                    f"dev_{k}",
-                    metric,
-                    epoch * dev_batches_qty + i)
             wandb.log(wandb_log)
-
         acum_dev_metrics = reset_metrics(acum_dev_metrics)
 
     destroy_process_group()

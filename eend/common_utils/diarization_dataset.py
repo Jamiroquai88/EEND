@@ -48,6 +48,7 @@ class KaldiDiarizationDataset(torch.utils.data.Dataset):
         subsampling: int,
         use_last_samples: bool,
         min_length: int,
+        return_speaker: bool,
         dtype: type = np.float32,
     ):
         self.data_dir = data_dir
@@ -62,6 +63,7 @@ class KaldiDiarizationDataset(torch.utils.data.Dataset):
         self.n_speakers = n_speakers
         self.sampling_rate = sampling_rate
         self.chunk_indices = []
+        self.return_speaker = return_speaker
 
         self.data = kaldi_data.KaldiData(self.data_dir)
 
@@ -93,15 +95,20 @@ class KaldiDiarizationDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, i: int) -> Tuple[np.ndarray, np.ndarray]:
         rec, st, ed = self.chunk_indices[i]
-        Y, T = features.get_labeledSTFT(
+        ret = features.get_labeledSTFT(
             self.data,
             rec,
             st,
             ed,
             self.frame_size,
             self.frame_shift,
-            self.n_speakers
+            self.n_speakers,
+            use_speaker_id=self.return_speaker
         )
+        if self.return_speaker:
+            Y, T, S = ret
+        else:
+            Y, T = ret
         Y = features.transform(
             Y, self.sampling_rate, self.feature_dim, self.input_transform)
         Y_spliced = features.splice(Y, self.context_size)
@@ -114,5 +121,7 @@ class KaldiDiarizationDataset(torch.utils.data.Dataset):
                 T_ss.sum(axis=0))[::-1][:self.n_speakers]
             T_ss = T_ss[:, selected_spkrs]
 
-        return torch.from_numpy(np.copy(Y_ss)), torch.from_numpy(
-            np.copy(T_ss)), rec
+        if self.return_speaker:
+            return torch.from_numpy(np.copy(Y_ss)), torch.from_numpy(np.copy(T_ss)), rec, torch.from_numpy(np.copy(S[::self.subsampling]))
+        else:
+            return torch.from_numpy(np.copy(Y_ss)), torch.from_numpy(np.copy(T_ss)), rec

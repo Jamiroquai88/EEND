@@ -93,6 +93,7 @@ def new_metrics() -> Dict[str, float]:
         'loss',
         'loss_standard',
         'loss_attractor',
+        'loss_spk',
         'avg_ref_spk_qty',
         'avg_pred_spk_qty',
         'DER_FA',
