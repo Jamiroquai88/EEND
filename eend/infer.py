@@ -24,6 +24,7 @@ import random
 import torch
 import yamlargparse
 
+torch.set_num_threads(1)
 
 def get_infer_dataloader(args: SimpleNamespace) -> DataLoader:
     infer_set = KaldiDiarizationDataset(
@@ -45,7 +46,7 @@ def get_infer_dataloader(args: SimpleNamespace) -> DataLoader:
         infer_set,
         batch_size=1,
         collate_fn=_convert,
-        num_workers=0,
+        num_workers=1,
         shuffle=False,
         worker_init_fn=_init_fn,
     )
@@ -179,6 +180,7 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--transformer-encoder-n-heads', type=int)
     parser.add_argument('--transformer-encoder-n-layers', type=int)
     parser.add_argument('--transformer-encoder-dropout', type=float)
+    parser.add_argument('--chunk-size', type=int, default=1000, help='chunk size of features pass to the encoder')
 
     attractor_args = parser.add_argument_group('attractor')
     attractor_args.add_argument(

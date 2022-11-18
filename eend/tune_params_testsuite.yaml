@@ -1,0 +1,32 @@
+program: tune_params.py
+method: random
+metric:
+  goal: minimize
+  name: WDER
+parameters:
+  time_shuffle:
+    value: "False"
+  estimate_spk_qty:
+    value: -1
+  estimate_spk_qty_thr:
+     value: 0.5933
+  threshold:
+    value: 0.3873
+  median_window_length:
+    value: 1
+  chunk_size:
+    value: 4096
+  epochs:
+    value: '30-40'
+  wder_script:
+    value: /home/ubuntu/jprofant/Github/revspeech/kaldi_egs/testing/diarization/wder/wder.py
+  wder_interpreter:
+    value: /home/ubuntu/jenny/miniconda3/envs/revspeech/bin/python
+  wer_results:
+    value: /home/ubuntu/jprofant/Github/revspeech/kaldi_egs/results/revspeech/20220208_e2e/axon_202005_8k/results/wer
+  infer_data_dir:
+    value: /home/ubuntu/jprofant/Github/revspeech/kaldi_egs/data/EEND/axon_202005_8k
+  infer_config:
+    value: ../examples/infer_4-4.yaml
+  models_path:
+    value: ../exp/verbatim_EEND_really-fixed-segments_vad-align_upto5spk_no-NULL/models

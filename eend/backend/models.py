@@ -320,12 +320,9 @@ class TransformerEDADiarization(Module):
             "Either 'estimate_spk_qty_thr' or 'estimate_spk_qty' \
             arguments have to be defined."
          # run encoder in chunking
-        #emb_chunks = []
-        #for chunk_start in range(0, xs.shape[1], args.chunk_size):
-        #    xs_chunk = xs[:, chunk_start:chunk_start + args.chunk_size, :]
-        #    emb_chunks.append(self.get_embeddings(xs_chunk))
-        #emb = torch.cat(emb_chunks, dim=1)
+
         emb = self.get_embeddings(xs)
+
         ys_active = []
         if args.time_shuffle:
             orders = [np.arange(e.shape[0]) for e in emb]

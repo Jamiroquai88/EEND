@@ -33,6 +33,7 @@ import random
 import torch
 import logging
 import yamlargparse
+import wandb
 
 torch.set_num_threads(4)
 
@@ -183,6 +184,8 @@ def parse_arguments() -> SimpleNamespace:
     parser.add_argument('--feature-dim', type=int)
     parser.add_argument('--frame-shift', type=int)
     parser.add_argument('--frame-size', type=int)
+    parser.add_argument('--gpu', '-g', default=-1, type=str,
+                        help='GPU ID (negative value indicates CPU)')
     parser.add_argument('--gradclip', default=-1, type=int,
                         help='gradient clipping. if < 0, no clipping')
     parser.add_argument('--hidden-size', type=int,
@@ -332,6 +335,7 @@ if __name__ == '__main__':
         model_ddp = DistributedDataParallel(model, device_ids=[args.gpu[rank]], find_unused_parameters=True)
 
     log_start = time.time()
+
     for epoch in range(init_epoch, args.max_epochs):
         model_ddp.train()
         for i, batch in enumerate(train_loader):
@@ -352,9 +356,13 @@ if __name__ == '__main__':
                           f'took {time.time() - log_start:.2f} seconds')
                 log_start = time.time()
                 for k in acum_train_metrics.keys():
+                    if isinstance(acum_train_metrics[k], float):
+                        metric = acum_train_metrics[k] / args.log_report_batches_num
+                    elif isinstance(acum_train_metrics[k], torch.Tensor):
+                        metric = acum_train_metrics[k].mean() / args.log_report_batches_num
                     writer.add_scalar(
                         f"train_{k}",
-                        acum_train_metrics[k] / args.log_report_batches_num,
+                        metric,
                         epoch * train_batches_qty + i)
                 writer.add_scalar(
                     "lrate",
@@ -362,8 +370,10 @@ if __name__ == '__main__':
                     epoch * train_batches_qty + i)
                 acum_train_metrics = reset_metrics(acum_train_metrics)
             optimizer.zero_grad()
+
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model_ddp.parameters(), args.gradclip)
+
             optimizer.step()
 
         if rank == 0:
@@ -393,6 +403,7 @@ if __name__ == '__main__':
                     metric,
                     epoch * dev_batches_qty + i)
             wandb.log(wandb_log)
+
         acum_dev_metrics = reset_metrics(acum_dev_metrics)
 
     destroy_process_group()
